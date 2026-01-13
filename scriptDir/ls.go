@@ -25,13 +25,7 @@ func printHelp() {
   -r, --reverse              обратный порядок сортировки
   -R, --recursive            выводить подкаталоги рекурсивно
       --help                 показать эту справку и выйти
-
-Примеры:
-  %s -la               Подробный список всех файлов
-  %s -lh *.go          Go файлы с читаемыми размерами
-  %s -R /var/log       Рекурсивно показать содержимое /var/log
-  %s --help            Показать эту справку
-`, programName, programName, programName, programName, programName)
+`, programName)
 }
 
 func main() {
