@@ -4,13 +4,15 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"path/filepath"
+	"os"
 )
 
 const dotCharacter = 46
 
 func main() {
 	// Варианты флагов (ключей для передачи скрипту)
-	//recursiveFlag := flag.Bool("R", false, "List subdirectories recursively")
+	recursiveFlag := flag.Bool("R", false, "List subdirectories recursively")
 	//allFlag := flag.Bool("a", false, "Do not ignore entries starting with .")
 	//longListingFlag := flag.Bool("l", false, "Use a long listing format")
 	//reverseFlag := flag.Bool("r", false, "Reverse order while sorting")
@@ -24,20 +26,42 @@ func main() {
 
 	if len(inputDirs) == 0 {
 		// По умолчанию просматриваем текущую директорию
-		showListElems(".")
+		showListElems(".", *recursiveFlag)
 		return
 	} else {
 		// Для множества указанных директорий
 		for _, dir := range inputDirs {
 			fmt.Printf("%s:\n", dir)
-			showListElems(dir)
+			showListElems(dir, *recursiveFlag)
 			fmt.Println()
 		}
 	}
 
 }
 
-func showListElems(path string) {
+func showListElems(path string, recursive bool) {
+	if recursive {
+	    root := "./" // начальная директория
+    	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+        if err != nil {
+            fmt.Printf("Error while access to path %q: %v\n", path, err)
+	            	return nil
+        	}
+            if isHidden(info.Name()) {
+	            return nil
+            }
+        	if info.IsDir() {
+            		fmt.Printf("%s/\n", path)
+        	} else {
+            		fmt.Printf("%s\n", path)
+        	}
+        	return nil
+    		})
+    		if err != nil {
+        		fmt.Printf("Error while bypass directory: %v\n", err)
+    		}
+		return
+	}
 	// Чтение содержимого директории
 	lst, err := ioutil.ReadDir(path)
 	if err != nil {
