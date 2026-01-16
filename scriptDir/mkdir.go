@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"syscall"
 )
 
 func main() {
@@ -20,7 +21,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Создает указанные директории.\n\n")
 		fmt.Fprintf(os.Stderr, "Ключи:\n")
 		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nПо умолчанию используется режим 0755 (rwxr-xr-x).\n")
 	}
 	
 	flag.Parse()
@@ -39,8 +39,13 @@ func main() {
 		os.Exit(1)
 	}
 	
+	// Получаем текущий umask
+	currentUmask := syscall.Umask(0) // Получаем и временно устанавливаем 0
+	syscall.Umask(currentUmask)      // Восстанавливаем обратно
+	
 	// Определяем режим доступа
-	mode := os.ModeDir | 0755 // Режим по умолчанию
+	var mode os.FileMode = os.ModeDir | 0755 // Режим по умолчанию
+	
 	if *modeFlag != "" {
 		// Парсим режим (восьмеричное число)
 		modeValue, err := strconv.ParseUint(*modeFlag, 8, 32)
@@ -48,7 +53,14 @@ func main() {
 			fmt.Fprintf(os.Stderr, "%s: неверный режим '%s'\n", os.Args[0], *modeFlag)
 			os.Exit(1)
 		}
+		
+		// Если указан явный режим, применяем его как есть (без учета umask)
 		mode = os.ModeDir | os.FileMode(modeValue)
+	} else {
+		// Если режим не указан, учитываем umask для режима по умолчанию
+		// 0777 & ^currentUmask = применяем umask к полным правам
+		defaultMode := 0777 & ^uint32(currentUmask)
+		mode = os.ModeDir | os.FileMode(defaultMode)
 	}
 	
 	// Создаем директории
@@ -69,6 +81,7 @@ func main() {
 func createDirectory(path string, parents bool, mode os.FileMode, verbose bool) error {
 	if parents {
 		// Создаем все родительские директории при необходимости
+		// Для родительских директорий также нужно установить правильные права
 		err := os.MkdirAll(path, mode)
 		if err == nil && verbose {
 			fmt.Printf("mkdir: создана директория '%s'\n", path)
@@ -76,7 +89,11 @@ func createDirectory(path string, parents bool, mode os.FileMode, verbose bool) 
 		return err
 	} else {
 		// Создаем только указанную директорию
+		// Временно отключаем umask при создании директории
+		oldUmask := syscall.Umask(0)
 		err := os.Mkdir(path, mode)
+		syscall.Umask(oldUmask) // Восстанавливаем umask
+		
 		if err == nil && verbose {
 			fmt.Printf("mkdir: создана директория '%s'\n", path)
 		}
