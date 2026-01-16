@@ -415,20 +415,12 @@ func cleanHistoryLine(line string) string {
 
 func printHelp() {
 	fmt.Println("!n - Execute command from history")
-	fmt.Println("================================")
 	fmt.Println()
-	fmt.Println("Usage: !n <spec> [args...]")
+	fmt.Println("Usage: !n <spec>")
 	fmt.Println()
 	fmt.Println("Command specifications:")
 	fmt.Println("  n           Execute command number n")
-	fmt.Println("  !n          Execute command number n")
-	fmt.Println("  !-n         Execute command n from end")
-	fmt.Println("  !string     Execute last command starting with string")
 	fmt.Println()
-	fmt.Println("Examples:")
+	fmt.Println("Example:")
 	fmt.Println("  !n 42          Execute command 42")
-	fmt.Println("  !n !-1         Execute last command")
-	fmt.Println("  !n !cd         Execute last cd command (launches new shell in directory)")
-	fmt.Println()
-	fmt.Println("Note: cd command launches a new shell in the target directory")
 }
