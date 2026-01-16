@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"syscall"
+	"time"
 )
 
 const dotCharacter = 46
@@ -104,6 +106,11 @@ func showListElemsRecursive(root string, all, longListing, reverse, humanReadabl
 		}
 		
 		if info.IsDir() && path != root {
+			// Пропускаем . и .. даже если all=true (как в оригинальном ls)
+			if info.Name() == "." || info.Name() == ".." {
+				return nil
+			}
+			
 			// Проверяем скрытые директории
 			if !all && isHidden(info.Name()) {
 				return filepath.SkipDir
@@ -151,6 +158,34 @@ func showSingleDir(path string, all, longListing, reverse, humanReadable, showHe
 		}
 	}
 
+	// Если включен флаг -a, добавляем записи для . и ..
+	if all {
+		// Добавляем запись для текущей директории (.)
+		if dirInfo, err := os.Stat(path); err == nil {
+			dotEntry := &dotDirInfo{
+				name:    ".",
+				size:    dirInfo.Size(),
+				mode:    dirInfo.Mode(),
+				modTime: dirInfo.ModTime(),
+				sys:     dirInfo.Sys(),
+			}
+			entries = append([]os.FileInfo{dotEntry}, entries...)
+		}
+
+		// Добавляем запись для родительской директории (..)
+		parentPath := filepath.Dir(path)
+		if parentInfo, err := os.Stat(parentPath); err == nil {
+			dotDotEntry := &dotDirInfo{
+				name:    "..",
+				size:    parentInfo.Size(),
+				mode:    parentInfo.Mode(),
+				modTime: parentInfo.ModTime(),
+				sys:     parentInfo.Sys(),
+			}
+			entries = append([]os.FileInfo{dotDotEntry}, entries...)
+		}
+	}
+
 	// Сортировка по имени
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Name() < entries[j].Name()
@@ -172,6 +207,22 @@ func showSingleDir(path string, all, longListing, reverse, humanReadable, showHe
 	}
 }
 
+// Структура для представления . и .. директорий
+type dotDirInfo struct {
+	name    string
+	size    int64
+	mode    os.FileMode
+	modTime time.Time
+	sys     interface{}
+}
+
+func (d *dotDirInfo) Name() string       { return d.name }
+func (d *dotDirInfo) Size() int64        { return d.size }
+func (d *dotDirInfo) Mode() os.FileMode  { return d.mode }
+func (d *dotDirInfo) ModTime() time.Time { return d.modTime }
+func (d *dotDirInfo) IsDir() bool        { return true }
+func (d *dotDirInfo) Sys() interface{}   { return d.sys }
+
 func showSimpleFormat(entries []os.FileInfo) {
 	if len(entries) == 0 {
 		return
@@ -188,93 +239,207 @@ func showSimpleFormat(entries []os.FileInfo) {
 }
 
 func showLongFormat(entries []os.FileInfo, path string, humanReadable bool) {
+	// Общее количество блоков по 1K (1024 байта), как в ls
 	var totalBlocks int64
 	for _, entry := range entries {
-		totalBlocks += entry.Size() / 512 // Блоки по 512 байт
+		// Получаем информацию о файле через stat
+		if stat, ok := entry.Sys().(*syscall.Stat_t); ok {
+			// stat.Blocks возвращает количество блоков по 512 байт
+			// ls делит это на 2 чтобы получить блоки по 1K
+			totalBlocks += stat.Blocks / 2
+		} else {
+			// Fallback: вычисляем блоки по 1024 байта
+			totalBlocks += (entry.Size() + 1023) / 1024
+		}
 	}
+	
 	if len(entries) > 0 {
 		fmt.Printf("total %d\n", totalBlocks)
 	}
 
-	// Находим максимальную длину строки размера для выравнивания
+	// Находим максимальную длину для разных полей
 	maxSizeLen := 0
+	maxLinksLen := 0
+	maxUserLen := 0
+	maxGroupLen := 0
+	
 	for _, entry := range entries {
+		// Длина для размера файла
 		var sizeStr string
 		if humanReadable {
-			sizeStr = formatSizeHumanReadable(entry.Size())
+			sizeStr = formatSizeHumanReadable(getFileSize(entry))
 		} else {
-			sizeStr = fmt.Sprintf("%d", entry.Size())
+			sizeStr = fmt.Sprintf("%d", getFileSize(entry))
 		}
 		if len(sizeStr) > maxSizeLen {
 			maxSizeLen = len(sizeStr)
+		}
+		
+		// Длина для количества ссылок
+		links := fmt.Sprintf("%d", getFileLinks(entry))
+		if len(links) > maxLinksLen {
+			maxLinksLen = len(links)
+		}
+		
+		// Длина для имени пользователя и группы
+		uid, gid := getFileOwner(entry)
+		user := getUserName(uid)
+		group := getGroupName(gid)
+		
+		if len(user) > maxUserLen {
+			maxUserLen = len(user)
+		}
+		if len(group) > maxGroupLen {
+			maxGroupLen = len(group)
 		}
 	}
 
 	for _, entry := range entries {
 		// Права доступа
-		mode := entry.Mode().String()
+		mode := formatFileMode(entry.Mode())
 
-		// Время изменения (формат как в ls)
-		modTime := entry.ModTime().Format("Jan _2 15:04")
+		// Количество ссылок
+		nlink := getFileLinks(entry)
 
-		// Размер файла в нужном формате
+		// Владелец и группа
+		uid, gid := getFileOwner(entry)
+		user := getUserName(uid)
+		group := getGroupName(gid)
+
+		// Размер файла
+		fileSize := getFileSize(entry)
 		var sizeStr string
 		if humanReadable {
-			sizeStr = formatSizeHumanReadable(entry.Size())
+			sizeStr = formatSizeHumanReadable(fileSize)
 		} else {
-			sizeStr = fmt.Sprintf("%d", entry.Size())
+			sizeStr = fmt.Sprintf("%d", fileSize)
 		}
 
-		// Имя файла/директории
-		name := entry.Name()
-		if entry.IsDir() {
-			name = name + "/"
-		}
+		// Время изменения
+		modTime := formatModTime(entry.ModTime())
 
-		// Форматированный вывод с выравниванием
-		fmt.Printf("%s %*s %s %s\n", mode, maxSizeLen, sizeStr, modTime, name)
+		// Имя файла
+		name := formatFileName(entry)
+
+		// Форматированный вывод
+		fmt.Printf("%s %*d %-*s %-*s %*s %s %s\n", 
+			mode, 
+			maxLinksLen, nlink,
+			maxUserLen, user,
+			maxGroupLen, group,
+			maxSizeLen, sizeStr,
+			modTime, name)
 	}
+}
+
+// getFileSize возвращает размер файла в байтах
+func getFileSize(entry os.FileInfo) int64 {
+	if stat, ok := entry.Sys().(*syscall.Stat_t); ok {
+		return stat.Size
+	}
+	return entry.Size()
+}
+
+// getFileLinks возвращает количество жестких ссылок
+func getFileLinks(entry os.FileInfo) int64 {
+	if stat, ok := entry.Sys().(*syscall.Stat_t); ok {
+		return int64(stat.Nlink)
+	}
+	return 1
+}
+
+// getFileOwner возвращает UID и GID владельца файла
+func getFileOwner(entry os.FileInfo) (uint32, uint32) {
+	if stat, ok := entry.Sys().(*syscall.Stat_t); ok {
+		return stat.Uid, stat.Gid
+	}
+	return 1000, 1000 // Default for user
+}
+
+// getUserName возвращает имя пользователя по UID
+func getUserName(uid uint32) string {
+	// Здесь должна быть реализация получения имени из /etc/passwd
+	// Для простоты возвращаем числовой идентификатор
+	return fmt.Sprintf("%d", uid)
+}
+
+// getGroupName возвращает имя группы по GID
+func getGroupName(gid uint32) string {
+	// Здесь должна быть реализация получения имени из /etc/group
+	// Для простоты возвращаем числовой идентификатор
+	return fmt.Sprintf("%d", gid)
+}
+
+// formatFileMode форматирует права доступа в стиле ls -l
+func formatFileMode(mode os.FileMode) string {
+	str := mode.String()
+	
+	// Преобразуем в формат ls (10 символов)
+	if len(str) > 10 {
+		return str[:10]
+	}
+	return str
+}
+
+// formatModTime форматирует время изменения
+func formatModTime(t time.Time) string {
+	now := time.Now()
+	sixMonthsAgo := now.AddDate(0, -6, 0)
+	
+	if t.Before(sixMonthsAgo) {
+		// Более 6 месяцев назад - показываем год
+		return t.Format("Jan _2  2006")
+	}
+	// В последние 6 месяцев - показываем время
+	return t.Format("Jan _2 15:04")
+}
+
+func formatFileName(entry os.FileInfo) string {
+	name := entry.Name()
+	
+	// Не добавляем / для . и .. (как в оригинальном ls)
+	if name == "." || name == ".." {
+		return name
+	}
+	
+	// Добавляем / для остальных директорий
+	if entry.IsDir() {
+		return name + "/"
+	}
+	
+	return name
 }
 
 // formatSizeHumanReadable преобразует размер в байтах в человеко-читаемый формат
+// formatSizeHumanReadable преобразует размер в байтах в человеко-читаемый формат
+// formatSizeHumanReadable преобразует размер в байтах в человеко-читаемый формат
 func formatSizeHumanReadable(size int64) string {
-	if size == 0 {
-		return "0"
-	}
-
-	// Единицы измерения
-	units := []string{"B", "K", "M", "G", "T", "P", "E"}
-	
-	// Определяем основание (1024 для двоичных префиксов, как в ls -h)
-	base := 1024.0
-	
-	// Если размер меньше 1K, показываем в байтах
-	if size < 1024 {
-		return fmt.Sprintf("%dB", size)
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d", size)
 	}
 	
-	// Находим подходящую единицу измерения
+	units := []string{"K", "M", "G", "T", "P", "E"}
+	
+	div := unit
 	exp := 0
-	value := float64(size)
-	for value >= base && exp < len(units)-1 {
-		value /= base
+	for n := size / unit; n >= unit && exp < len(units); n /= unit {
+		div *= unit
 		exp++
 	}
 	
-	// Форматируем вывод
-	// Если значение целое, показываем без десятичной части
-	if value == float64(int64(value)) {
-		return fmt.Sprintf("%.0f%s", value, units[exp])
+	if exp == 0 {
+		// Размер между 1K и 1023K
+		return fmt.Sprintf("%.0fK", float64(size)/float64(unit))
 	}
 	
-	// Для значений больше 10 показываем без десятичной части
-	if value >= 10 {
-		return fmt.Sprintf("%.0f%s", value, units[exp])
+	value := float64(size) / float64(div)
+	if value < 10 {
+		return fmt.Sprintf("%.1f%s", value, units[exp-1])
 	}
-	
-	// Для значений меньше 10 показываем с одной десятичной цифрой
-	return fmt.Sprintf("%.1f%s", value, units[exp])
+	return fmt.Sprintf("%.0f%s", value, units[exp-1])
 }
+
 
 func isHidden(path string) bool {
 	if len(path) == 0 {
