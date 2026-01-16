@@ -4,185 +4,238 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
 )
 
 func main() {
-	// Флаги
-	printPath := flag.Bool("P", false, "print physical path")
-	evalMode := flag.Bool("eval", false, "output shell eval commands")
-	help := flag.Bool("help", false, "show help")
-	version := flag.Bool("version", false, "show version")
+	// Определяем флаги
+	printHelpFlag := flag.Bool("help", false, "display this help and exit")
+	printVersionFlag := flag.Bool("version", false, "output version information and exit")
+	noPrintFlag := flag.Bool("P", false, "do not print the directory name")
+	
+	flag.Usage = func() {
+		printHelp()
+	}
+	
+	// Проверяем наличие --help до парсинга флагов
+	for _, arg := range os.Args[1:] {
+		if arg == "--help" {
+			printHelp()
+			return
+		}
+		if arg == "--version" {
+			printVersion()
+			return
+		}
+	}
 	
 	flag.Parse()
 	
-	if *help {
-		printFullHelp()
+	if *printHelpFlag {
+		printHelp()
 		return
 	}
 	
-	if *version {
-		fmt.Println("cd-go 1.0")
+	if *printVersionFlag {
+		printVersion()
 		return
 	}
 	
-	// Получаем целевой каталог
-	var target string
+	// Получаем аргументы
 	args := flag.Args()
 	
-	if len(args) > 0 {
-		target = args[0]
-	} else {
+	// Определяем целевой путь
+	var target string
+	if len(args) == 0 {
+		// Без аргументов - домашняя директория
 		target = "~"
+	} else {
+		target = args[0]
 	}
 	
-	// Разрешаем путь
-	newDir, oldDir, err := resolveDirectory(target)
-	if err != nil {
+	// Выполняем смену директории
+	if err := changeDirectory(target, *noPrintFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "cd: %v\n", err)
 		os.Exit(1)
 	}
-	
-	// Режим eval - выводим команды для shell
-	if *evalMode {
-		outputEvalCommands(oldDir, newDir, *printPath)
-		return
-	}
-	
-	// Обычный режим - просто выводим путь
-	if *printPath || target == "-" {
-		fmt.Println(newDir)
-	} else {
-		// В обычном режиме просто выводим путь
-		// Shell функция будет использовать его
-		fmt.Println(newDir)
-	}
 }
 
-func resolveDirectory(target string) (newDir, oldDir string, err error) {
-	// Получаем текущую директорию
-	oldDir, _ = os.Getwd()
-	
-	// Разрешаем специальные символы
-	resolved, err := expandPath(target)
+func printHelp() {
+	fmt.Printf(`Использование: %s [ДИРЕКТОРИЯ]
+
+Изменяет текущую рабочую директорию, заменяя текущий shell.
+
+Если ДИРЕКТОРИЯ не указана, переходит в домашнюю директорию.
+
+Специальные значения:
+  -              перейти в предыдущую рабочую директорию
+  ~              домашняя директория текущего пользователя
+  ~username      домашняя директория пользователя username
+
+Ключи:
+  -P             не выводить имя директории (для -)
+      --help     показать эту справку и выйти
+      --version  показать информацию о версии и выйти
+
+Примеры:
+  %s /tmp        # перейти в /tmp
+  %s ~          # перейти в домашнюю директорию
+  %s -          # вернуться в предыдущую директорию
+`, os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+}
+
+func printVersion() {
+	fmt.Printf("%s (go-cd) 1.0\n", os.Args[0])
+	fmt.Println("Реализация cd с использованием exec")
+}
+
+func changeDirectory(target string, noPrint bool) error {
+	// Раскрываем тильду
+	path, err := expandPath(target)
 	if err != nil {
-		return "", oldDir, err
+		return err
 	}
 	
 	// Получаем абсолютный путь
-	absPath, err := filepath.Abs(resolved)
+	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return "", oldDir, fmt.Errorf("%s: %v", target, err)
+		return err
 	}
 	
-	// Проверяем директорию
-	if err := verifyDirectory(absPath); err != nil {
-		return "", oldDir, fmt.Errorf("%s: %v", target, err)
+	// Проверяем существование
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("%s: %v", target, err)
 	}
 	
-	return absPath, oldDir, nil
+	if !info.IsDir() {
+		return fmt.Errorf("%s: не является директорией", target)
+	}
+	
+	// Специальный случай для "-" (предыдущая директория)
+	if target == "-" {
+		oldpwd := os.Getenv("OLDPWD")
+		if oldpwd == "" {
+			return fmt.Errorf("OLDPWD не установлена")
+		}
+		absPath = oldpwd
+		if !noPrint {
+			fmt.Println(absPath)
+		}
+	}
+	
+	// Получаем текущую директорию
+	currentDir, err := os.Getwd()
+	if err != nil {
+		currentDir = os.Getenv("PWD")
+	}
+	
+	// Устанавливаем OLDPWD в окружении
+	os.Setenv("OLDPWD", currentDir)
+	
+	// Меняем директорию в текущем процессе
+	if err := os.Chdir(absPath); err != nil {
+		return fmt.Errorf("не удалось сменить директорию: %v", err)
+	}
+	
+	// Устанавливаем PWD в окружении
+	os.Setenv("PWD", absPath)
+	
+	// Получаем текущий shell
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/bash"
+	}
+	
+	// Используем exec для замены текущего процесса новым shell
+	// с сохранением всех переменных окружения
+	cmd := exec.Command(shell)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	
+	// Устанавливаем директорию для новой команды
+	cmd.Dir = absPath
+	
+	// Копируем все переменные окружения
+	cmd.Env = os.Environ()
+	
+	// Заменяем текущий процесс новым shell
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ошибка запуска shell: %v", err)
+	}
+	
+	// Этот код никогда не выполнится из-за exec
+	return nil
 }
 
 func expandPath(path string) (string, error) {
-	// ~
-	if path == "~" || path == "" {
-		return getHomeDir(), nil
-	}
-	
-	// ~/path
-	if strings.HasPrefix(path, "~/") {
-		return filepath.Join(getHomeDir(), path[2:]), nil
-	}
-	
-	// ~username/path
-	if strings.HasPrefix(path, "~") {
-		parts := strings.SplitN(path[1:], "/", 2)
-		username := parts[0]
-		
-		usr, err := user.Lookup(username)
-		if err != nil {
-			return "", fmt.Errorf("%s: no such user", username)
-		}
-		
-		if len(parts) > 1 {
-			return filepath.Join(usr.HomeDir, parts[1]), nil
-		}
-		return usr.HomeDir, nil
-	}
-	
-	// -
+	// Специальный случай для "-"
 	if path == "-" {
 		oldpwd := os.Getenv("OLDPWD")
 		if oldpwd == "" {
-			return "", fmt.Errorf("OLDPWD not set")
+			return "", fmt.Errorf("OLDPWD не установлена")
 		}
 		return oldpwd, nil
+	}
+	
+	// Раскрываем тильду
+	if strings.HasPrefix(path, "~") {
+		return expandTilde(path)
 	}
 	
 	return path, nil
 }
 
-func getHomeDir() string {
-	if home := os.Getenv("HOME"); home != "" {
-		return home
-	}
-	
-	if usr, err := user.Current(); err == nil {
-		return usr.HomeDir
-	}
-	
-	return "/"
-}
-
-func verifyDirectory(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("No such file or directory")
+func expandTilde(path string) (string, error) {
+	// ~
+	if path == "~" {
+		home := os.Getenv("HOME")
+		if home == "" {
+			if u, err := user.Current(); err == nil {
+				return u.HomeDir, nil
+			}
+			return "", fmt.Errorf("HOME не установлена")
 		}
-		return err
+		return home, nil
 	}
 	
-	if !info.IsDir() {
-		return fmt.Errorf("Not a directory")
+	// ~/something
+	if strings.HasPrefix(path, "~/") {
+		home := os.Getenv("HOME")
+		if home == "" {
+			if u, err := user.Current(); err == nil {
+				home = u.HomeDir
+			} else {
+				return "", fmt.Errorf("HOME не установлена")
+			}
+		}
+		return filepath.Join(home, path[2:]), nil
 	}
 	
-	// Проверяем права на выполнение
-	if info.Mode().Perm()&0111 == 0 {
-		return fmt.Errorf("Permission denied")
+	// ~username
+	if strings.HasPrefix(path, "~") && !strings.HasPrefix(path, "~/") {
+		username := path[1:]
+		if strings.Contains(username, "/") {
+			username = strings.Split(username, "/")[0]
+		}
+		
+		// Ищем пользователя
+		u, err := user.Lookup(username)
+		if err != nil {
+			return "", fmt.Errorf("пользователь %s не найден", username)
+		}
+		
+		// Если путь содержит поддиректорию
+		if strings.Contains(path, "/") {
+			return filepath.Join(u.HomeDir, strings.SplitN(path, "/", 2)[1]), nil
+		}
+		
+		return u.HomeDir, nil
 	}
 	
-	return nil
-}
-
-func outputEvalCommands(oldDir, newDir string, printPath bool) {
-	// Выводим команды которые можно выполнить через eval
-	commands := []string{
-		fmt.Sprintf("export OLDPWD='%s'", oldDir),
-		fmt.Sprintf("export PWD='%s'", newDir),
-		fmt.Sprintf("builtin cd '%s'", newDir),
-	}
-	
-	if printPath {
-		commands = append([]string{fmt.Sprintf("echo '%s'", newDir)}, commands...)
-	}
-	
-	fmt.Println(strings.Join(commands, "; "))
-}
-
-func printFullHelp() {
-	fmt.Println()
-	fmt.Println("Usage: cd [OPTIONS] [DIRECTORY]")
-	fmt.Println()
-	fmt.Println("Options:")
-	fmt.Println("  -P        Print the physical directory")
-	fmt.Println("  -help     Show this help")
-	fmt.Println("  -version  Show version")
-	fmt.Println()
-	fmt.Println("Examples:")
-	fmt.Println("  ./cd /tmp                 # Output directory path")
-	fmt.Println("  ./cd -P ~                 # Print physical home directory")
-	fmt.Println()
+	return path, nil
 }
