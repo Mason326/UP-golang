@@ -361,8 +361,6 @@ func printHelp() {
 	fmt.Println("  !!          # repeat last command")
 	fmt.Println("  !! -la      # add -la to last command")
 	fmt.Println("  !! /var     # replace last argument with /var")
-	fmt.Println("  !!2         # repeat second last command")
 	fmt.Println("  !! --help   # show this help")
 	fmt.Println()
-	fmt.Println("Note: cd commands will launch a new shell in the target directory")
 }
