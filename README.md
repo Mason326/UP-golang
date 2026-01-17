@@ -82,6 +82,6 @@ Link to the official website: https://redos.red-soft.ru/product/downloads/
 ```bash
     ./date
 ```
-<pre>
 Output:
+<pre>
     Sun Jan 18 00:50:29 MSK 2026
