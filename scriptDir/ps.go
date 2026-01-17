@@ -1,32 +1,39 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
-	"runtime"
-	"sort"
+	"os/exec"
+	"os/user"
+	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 type ProcessInfo struct {
 	PID     int
 	PPID    int
-	Name    string
-	CPU     float64
-	Memory  float64
-	Status  string
 	User    string
+	TTY     string
+	Stat    string
 	Time    string
 	Command string
+	VSZ     int
+	RSS     int
+	CPU     float64
+	Memory  float64
 }
 
 type PsOptions struct {
-	All     bool   // -A, -e
-	ListAll bool   // -a
-	Full    bool   // -f
-	User    string // -u
-	Help    bool   // --help
+	All     bool
+	ListAll bool
+	Full    bool
+	User    string
+	Help    bool
 }
 
 func main() {
@@ -37,7 +44,7 @@ func main() {
 		return
 	}
 
-	processes, err := getProcesses(opts)
+	processes, err := getRealProcesses(opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ps: error: %v\n", err)
 		os.Exit(1)
@@ -48,11 +55,6 @@ func main() {
 		processes = filterByUser(processes, opts.User)
 	}
 
-	// Сортировка по PID
-	sort.Slice(processes, func(i, j int) bool {
-		return processes[i].PID < processes[j].PID
-	})
-
 	// Вывод
 	printProcesses(processes, opts)
 }
@@ -60,7 +62,6 @@ func main() {
 func parseFlags() *PsOptions {
 	opts := &PsOptions{}
 
-	// Определение флагов (только указанные)
 	flag.BoolVar(&opts.All, "A", false, "show all processes")
 	flag.BoolVar(&opts.All, "e", false, "show all processes")
 	flag.BoolVar(&opts.ListAll, "a", false, "show all processes with tty")
@@ -72,138 +73,252 @@ func parseFlags() *PsOptions {
 	return opts
 }
 
-func getProcesses(opts *PsOptions) ([]ProcessInfo, error) {
-	// В зависимости от ОС используем разные методы
-	switch runtime.GOOS {
-	case "linux":
-		return getLinuxProcesses(opts)
-	case "windows":
-		return getWindowsProcesses(opts)
-	case "darwin":
-		return getMacProcesses(opts)
-	default:
-		return getGenericProcesses(opts)
-	}
-}
+func getRealProcesses(opts *PsOptions) ([]ProcessInfo, error) {
+	var processes []ProcessInfo
 
-func getLinuxProcesses(opts *PsOptions) ([]ProcessInfo, error) {
-	// Демонстрационные данные для Linux
-	processes := []ProcessInfo{
-		{PID: 1, PPID: 0, Name: "systemd", CPU: 0.1, Memory: 100, Status: "S", User: "root", Time: "00:10:00", Command: "/sbin/init"},
-		{PID: 123, PPID: 1, Name: "sshd", CPU: 0.2, Memory: 50, Status: "S", User: "root", Time: "00:05:30", Command: "/usr/sbin/sshd -D"},
-		{PID: 456, PPID: 1, Name: "bash", CPU: 0.1, Memory: 20, Status: "S", User: "user", Time: "00:01:15", Command: "-bash"},
-		{PID: 789, PPID: 456, Name: "ps", CPU: 0.5, Memory: 5, Status: "R", User: "user", Time: "00:00:00", Command: "./ps -f"},
-		{PID: 999, PPID: 1, Name: "cron", CPU: 0.0, Memory: 15, Status: "S", User: "root", Time: "00:00:10", Command: "/usr/sbin/cron"},
+	// Читаем директорию /proc
+	files, err := ioutil.ReadDir("/proc")
+	if err != nil {
+		return nil, fmt.Errorf("cannot read /proc: %v", err)
 	}
 
-	// Фильтрация для флага -a
-	if opts.ListAll && !opts.All {
-		// Показываем только процессы с TTY
-		var filtered []ProcessInfo
-		for _, proc := range processes {
-			// Предположим, что bash и ps имеют TTY
-			if proc.Name == "bash" || proc.Name == "ps" {
-				filtered = append(filtered, proc)
-			}
+	currentUser, _ := user.Current()
+	currentUsername := ""
+	if currentUser != nil {
+		currentUsername = currentUser.Username
+	}
+
+	// Получаем текущий TTY
+	currentTTY := getCurrentTTY()
+
+	for _, file := range files {
+		// Проверяем, является ли имя директории числом (PID)
+		pid, err := strconv.Atoi(file.Name())
+		if err != nil || !file.IsDir() {
+			continue
 		}
-		return filtered, nil
+
+		// Читаем информацию о процессе
+		proc, err := readProcessInfo(pid)
+		if err != nil {
+			// Пропускаем процессы, которые завершились
+			continue
+		}
+
+		// Применяем фильтры
+		if !shouldIncludeProcess(proc, opts, currentUsername, currentTTY) {
+			continue
+		}
+
+		processes = append(processes, proc)
 	}
 
 	return processes, nil
 }
 
-func getWindowsProcesses(opts *PsOptions) ([]ProcessInfo, error) {
-	// Демонстрационные данные для Windows
-	username := os.Getenv("USERNAME")
-	if username == "" {
-		username = "user"
+func shouldIncludeProcess(proc ProcessInfo, opts *PsOptions, currentUser, currentTTY string) bool {
+	if opts.All {
+		return true
 	}
 
-	return []ProcessInfo{
-		{PID: 0, PPID: 0, Name: "System Idle Process", CPU: 90.0, Memory: 1, Status: "Running", User: "SYSTEM", Time: "100:00:00", Command: "[System Process]"},
-		{PID: 4, PPID: 0, Name: "System", CPU: 2.5, Memory: 500, Status: "Running", User: "SYSTEM", Time: "50:00:00", Command: "NT Kernel & System"},
-		{PID: 1234, PPID: 456, Name: "explorer.exe", CPU: 1.2, Memory: 80000, Status: "Running", User: username, Time: "01:30:00", Command: "C:\\Windows\\explorer.exe"},
-		{PID: 5678, PPID: 1234, Name: "cmd.exe", CPU: 0.5, Memory: 5000, Status: "Running", User: username, Time: "00:05:00", Command: "C:\\Windows\\System32\\cmd.exe"},
-		{PID: 9999, PPID: 5678, Name: "ps.exe", CPU: 0.1, Memory: 2000, Status: "Running", User: username, Time: "00:00:01", Command: ".\\ps.exe"},
-	}, nil
-}
-
-func getMacProcesses(opts *PsOptions) ([]ProcessInfo, error) {
-	// Демонстрационные данные для macOS
-	username := os.Getenv("USER")
-	if username == "" {
-		username = "user"
+	if opts.ListAll {
+		// -a: все процессы с TTY (любого терминала)
+		return proc.TTY != "?"
 	}
 
-	return []ProcessInfo{
-		{PID: 1, PPID: 0, Name: "launchd", CPU: 0.1, Memory: 500, Status: "S", User: "root", Time: "100:00:00", Command: "/sbin/launchd"},
-		{PID: 123, PPID: 1, Name: "WindowServer", CPU: 5.2, Memory: 80000, Status: "S", User: "_windowserver", Time: "10:30:00", Command: "/System/Library/..."},
-		{PID: 456, PPID: 1, Name: "bash", CPU: 0.3, Memory: 4000, Status: "S", User: username, Time: "00:10:00", Command: "/bin/bash"},
-		{PID: 789, PPID: 456, Name: "ps", CPU: 0.1, Memory: 2000, Status: "R", User: username, Time: "00:00:00", Command: "./ps"},
-	}, nil
-}
+	if opts.User != "" {
+		return proc.User == opts.User
+	}
 
-func getGenericProcesses(opts *PsOptions) ([]ProcessInfo, error) {
-	// Общая реализация для неизвестных ОС
-	pid := os.Getpid()
-	ppid := os.Getppid()
+	// По умолчанию: только процессы текущего пользователя в ТЕКУЩЕМ TTY
+	if proc.User != currentUser {
+		return false
+	}
 	
-	return []ProcessInfo{
-		{
-			PID:     pid,
-			PPID:    ppid,
-			Name:    getExecutableName(),
-			CPU:     0.1,
-			Memory:  getMemoryUsage(),
-			Status:  "R",
-			User:    getUser(),
-			Time:    "00:00:01",
-			Command: strings.Join(os.Args, " "),
-		},
-	}, nil
+	// Сравниваем TTY процесса с текущим TTY
+	// Нормализуем TTY для сравнения
+	procTTY := normalizeTTY(proc.TTY)
+	currentTTYNormalized := normalizeTTY(currentTTY)
+	
+	return procTTY == currentTTYNormalized
 }
 
-func getExecutableName() string {
-	exe, err := os.Executable()
+func normalizeTTY(tty string) string {
+	if tty == "" || tty == "?" {
+		return tty
+	}
+	// Убираем префикс /dev/ если есть
+	tty = strings.TrimPrefix(tty, "/dev/")
+	// Убираем префикс pts/ для сравнения
+	tty = strings.TrimPrefix(tty, "pts/")
+	// Убираем префикс tty для сравнения
+	tty = strings.TrimPrefix(tty, "tty")
+	return tty
+}
+
+func getCurrentTTY() string {
+	// Пробуем несколько способов определить текущий TTY
+	
+	// 1. Через /proc/self/fd/0 (самый надежный способ)
+	if link, err := os.Readlink("/proc/self/fd/0"); err == nil {
+		if strings.Contains(link, "/dev/pts/") || strings.Contains(link, "/dev/tty") {
+			return filepath.Base(link)
+		}
+	}
+	
+	// 2. Через команду tty
+	if output, err := exec.Command("tty").Output(); err == nil {
+		tty := strings.TrimSpace(string(output))
+		if strings.HasPrefix(tty, "/dev/") {
+			return filepath.Base(tty)
+		}
+		return tty
+	}
+	
+	// 3. Через переменные окружения
+	if tty := os.Getenv("SSH_TTY"); tty != "" {
+		return filepath.Base(tty)
+	}
+	
+	// 4. Если мы в SSH сессии
+	if os.Getenv("SSH_CONNECTION") != "" {
+		// Пытаемся получить pts из ps
+		cmd := exec.Command("ps", "-o", "tty=", "-p", strconv.Itoa(os.Getpid()))
+		if output, err := cmd.Output(); err == nil {
+			tty := strings.TrimSpace(string(output))
+			if tty != "?" && tty != "" {
+				return tty
+			}
+		}
+	}
+	
+	// 5. Fallback - пытаемся угадать
+	return "pts/0"
+}
+
+func readProcessInfo(pid int) (ProcessInfo, error) {
+	proc := ProcessInfo{PID: pid}
+
+	// Читаем /proc/[pid]/stat
+	statPath := fmt.Sprintf("/proc/%d/stat", pid)
+	statData, err := ioutil.ReadFile(statPath)
 	if err != nil {
-		return "unknown"
+		return proc, err
 	}
+
+	// Парсим /proc/[pid]/stat
+	statStr := string(statData)
+	firstParen := strings.Index(statStr, "(")
+	lastParen := strings.LastIndex(statStr, ")")
 	
-	// Извлекаем только имя файла
-	if idx := strings.LastIndex(exe, string(os.PathSeparator)); idx != -1 {
-		return exe[idx+1:]
+	if firstParen == -1 || lastParen == -1 {
+		return proc, fmt.Errorf("invalid stat format")
 	}
-	if idx := strings.LastIndex(exe, "/"); idx != -1 {
-		return exe[idx+1:]
-	}
-	if idx := strings.LastIndex(exe, "\\"); idx != -1 {
-		return exe[idx+1:]
-	}
+
+	comm := statStr[firstParen+1 : lastParen]
+	fields := strings.Fields(statStr[lastParen+2:])
 	
-	return exe
+	if len(fields) < 20 {
+		return proc, fmt.Errorf("not enough fields in stat")
+	}
+
+	proc.Stat = fields[0]
+	ppid, _ := strconv.Atoi(fields[1])
+	proc.PPID = ppid
+	
+	ttyNr, _ := strconv.ParseUint(fields[4], 10, 64)
+	proc.TTY = getTTYFromNumber(int(ttyNr))
+	
+	utime, _ := strconv.ParseUint(fields[11], 10, 64)
+	stime, _ := strconv.ParseUint(fields[12], 10, 64)
+	totalTime := utime + stime
+	
+	proc.Time = formatCPUTime(totalTime)
+	
+	vsz, _ := strconv.Atoi(fields[20])
+	proc.VSZ = vsz
+	rss, _ := strconv.Atoi(fields[21])
+	proc.RSS = rss * 4096
+
+	// Читаем команду
+	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	cmdlineData, err := ioutil.ReadFile(cmdlinePath)
+	if err == nil && len(cmdlineData) > 0 {
+		cmdline := strings.ReplaceAll(string(cmdlineData), "\x00", " ")
+		cmdline = strings.TrimSpace(cmdline)
+		if cmdline == "" {
+			proc.Command = fmt.Sprintf("[%s]", comm)
+		} else {
+			proc.Command = cmdline
+		}
+	} else {
+		proc.Command = fmt.Sprintf("[%s]", comm)
+	}
+
+	// Получаем пользователя
+	statusPath := fmt.Sprintf("/proc/%d/status", pid)
+	statusData, err := ioutil.ReadFile(statusPath)
+	if err == nil {
+		scanner := bufio.NewScanner(bytes.NewReader(statusData))
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "Uid:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					uid, _ := strconv.Atoi(fields[1])
+					if u, err := user.LookupId(strconv.Itoa(uid)); err == nil {
+						proc.User = u.Username
+					} else {
+						proc.User = fields[1]
+					}
+				}
+				break
+			}
+		}
+	}
+
+	proc.CPU = 0.0 // Упрощаем - не считаем CPU%
+	proc.Memory = float64(proc.RSS) / 1024 / 1024
+
+	return proc, nil
 }
 
-func getMemoryUsage() float64 {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return float64(m.Alloc) / 1024 / 1024 // MB
+func getTTYFromNumber(ttyNr int) string {
+	if ttyNr == 0 {
+		return "?"
+	}
+	
+	major := (ttyNr >> 8) & 0xFF
+	minor := ttyNr & 0xFF
+	
+	if major == 4 {
+		return fmt.Sprintf("tty%d", minor)
+	} else if major == 136 {
+		return fmt.Sprintf("pts/%d", minor)
+	} else if major == 3 {
+		return fmt.Sprintf("tty%d", minor)
+	}
+	
+	// Для консольных tty
+	if ttyNr < 64 {
+		return fmt.Sprintf("tty%d", ttyNr)
+	}
+	
+	return "?"
 }
 
-func getUser() string {
-	// Пытаемся получить имя пользователя
-	if user := os.Getenv("USER"); user != "" {
-		return user
-	}
-	if user := os.Getenv("USERNAME"); user != "" {
-		return user
-	}
-	return "unknown"
+func formatCPUTime(clockTicks uint64) string {
+	seconds := clockTicks / 100
+	hours := seconds / 3600
+	minutes := (seconds % 3600) / 60
+	secs := seconds % 60
+	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, secs)
 }
 
 func filterByUser(processes []ProcessInfo, username string) []ProcessInfo {
 	var filtered []ProcessInfo
 	for _, proc := range processes {
-		if strings.EqualFold(proc.User, username) {
+		if proc.User == username {
 			filtered = append(filtered, proc)
 		}
 	}
@@ -211,6 +326,10 @@ func filterByUser(processes []ProcessInfo, username string) []ProcessInfo {
 }
 
 func printProcesses(processes []ProcessInfo, opts *PsOptions) {
+	if len(processes) == 0 {
+		return
+	}
+
 	if opts.Full {
 		printFullFormat(processes)
 	} else {
@@ -219,68 +338,77 @@ func printProcesses(processes []ProcessInfo, opts *PsOptions) {
 }
 
 func printDefaultFormat(processes []ProcessInfo) {
+	// Определяем максимальную ширину для PID
+	maxPID := 0
+	for _, proc := range processes {
+		if proc.PID > maxPID {
+			maxPID = proc.PID
+		}
+	}
+	
+	pidWidth := len(strconv.Itoa(maxPID))
+	if pidWidth < 5 {
+		pidWidth = 5
+	}
+	
 	// Заголовок
-	fmt.Printf("%-8s %-8s %-10s %s\n", "PID", "TTY", "TIME", "CMD")
+	fmt.Printf("%*s %-8s %-10s %s\n", pidWidth, "PID", "TTY", "TIME", "CMD")
 	
 	// Процессы
 	for _, proc := range processes {
-		// Упрощенный TTY
-		tty := getTTY(proc)
-		
-		// Обрезаем команду
+		// Обрезаем длинные команды
 		cmd := proc.Command
-		if len(cmd) > 40 {
-			cmd = cmd[:37] + "..."
-		}
-		if cmd == "" {
-			cmd = proc.Name
+		if len(cmd) > 50 {
+			cmd = cmd[:47] + "..."
 		}
 		
-		fmt.Printf("%-8d %-8s %-10s %s\n", proc.PID, tty, proc.Time, cmd)
+		fmt.Printf("%*d %-8s %-10s %s\n", 
+			pidWidth, proc.PID, 
+			proc.TTY, 
+			proc.Time, 
+			cmd)
 	}
 }
 
 func printFullFormat(processes []ProcessInfo) {
+	// Определяем максимальную ширину для PID
+	maxPID := 0
+	for _, proc := range processes {
+		if proc.PID > maxPID {
+			maxPID = proc.PID
+		}
+	}
+	
+	pidWidth := len(strconv.Itoa(maxPID))
+	if pidWidth < 5 {
+		pidWidth = 5
+	}
+	
 	// Заголовок
-	fmt.Printf("%-8s %-8s %-8s %-6s %-8s %-8s %-10s %s\n",
-		"UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD")
+	fmt.Printf("%-8s %*s %-8s %-4s %-8s %-8s %-10s %s\n",
+		"UID", pidWidth, "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD")
 	
 	// Процессы
 	for _, proc := range processes {
-		// Упрощенные значения
 		stime := "00:00"
-		tty := getTTY(proc)
+		if len(proc.Time) >= 5 {
+			stime = proc.Time[:5]
+		}
 		
-		// Обрезаем команду
 		cmd := proc.Command
 		if len(cmd) > 30 {
 			cmd = cmd[:27] + "..."
 		}
-		if cmd == "" {
-			cmd = proc.Name
-		}
 		
-		fmt.Printf("%-8s %-8d %-8d %-6.1f %-8s %-8s %-10s %s\n",
-			proc.User, proc.PID, proc.PPID, proc.CPU, stime, tty, proc.Time, cmd)
-	}
-}
-
-func getTTY(proc ProcessInfo) string {
-	// Упрощенное определение TTY
-	if runtime.GOOS == "windows" {
-		return "con"
-	}
-	
-	// Для демонстрационных данных
-	switch proc.Name {
-	case "bash", "ps", "ssh", "login":
-		return "pts/0"
-	case "systemd", "launchd", "init":
-		return "?"
-	case "explorer.exe", "cmd.exe":
-		return "con"
-	default:
-		return "?"
+		fmt.Printf("%-8s %*d %-8d %-4.1f %-8s %-8s %-10s %s\n",
+			proc.User,
+			pidWidth, proc.PID,
+			proc.PPID,
+			proc.CPU,
+			stime,
+			proc.TTY,
+			proc.Time,
+			cmd)
 	}
 }
 
@@ -295,21 +423,21 @@ func printHelp() {
   -u ПОЛЬЗОВАТЕЛЬ  процессы пользователя
       --help           справка
 
-По умолчанию показываются процессы текущего пользователя с терминалом.
-
-Флаги:
-  -A, -e   Показывать все процессы (включая системные)
-  -a       Показывать все процессы с терминалом
-  -f       Полный формат с дополнительной информацией
-  -u       Фильтровать по имени пользователя
+Поведение по умолчанию:
+  ps               процессы текущего пользователя в текущем терминале
+  ps -A или ps -e  все процессы
+  ps -a            все процессы с терминалом
+  ps -u user       процессы указанного пользователя
+  ps -f            полный формат с дополнительной информацией
 
 Примеры:
-  ps               Процессы текущего пользователя
-  ps -f            Полный формат
-  ps -A            Все процессы
-  ps -a            Все процессы с терминалом
-  ps -u root       Процессы пользователя root
-  ps --help        Справка
+  ps               # Процессы текущего пользователя в текущем терминале
+  ps -f            # Полный формат
+  ps -A            # Все процессы
+  ps -a            # Все процессы с терминалом
+  ps -u root       # Процессы пользователя root
+  ps -u user -f    # Полный формат для процессов пользователя user
+  ps --help        # Справка
 `
 
 	fmt.Println(helpText)

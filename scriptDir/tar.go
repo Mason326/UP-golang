@@ -579,9 +579,4 @@ func printHelp() {
 	fmt.Println("  -v, --verbose     Подробный вывод обрабатываемых файлов")
 	fmt.Println("      --help        Показать эту справку и выйти")
 	fmt.Println()
-	fmt.Println("Аргументы:")
-	fmt.Println("  АРХИВ    Имя архивного файла")
-	fmt.Println("  ФАЙЛЫ    Файлы и директории для архивации (только с -c)")
-	fmt.Println("           Поддерживаются шаблоны (wildcards): *.txt, dir/* и т.д.")
-	fmt.Println()
 }
